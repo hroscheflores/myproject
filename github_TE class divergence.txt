@@ -1,0 +1,92 @@
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(scales)
+})
+
+out_dir <- "path/to/output_directory"
+out_file <- "TE_class_divergence_by_class_facets.png"
+
+dataset_levels <- c("Sample_1", "Sample_2", "Sample_3", "Sample_4")
+class_levels <- c("DNA", "LINE", "LTR", "RC", "Unknown")
+
+df <- tibble::tribble(
+  ~Dataset, ~Class, ~Recent_percent, ~Intermediate_percent, ~Old_percent, ~Total,
+  "Sample_1", "DNA",     26.77, 19.96, 53.27,  36089101,
+  "Sample_1", "LINE",    17.06, 16.04, 66.90, 493908304,
+  "Sample_1", "LTR",     22.70, 15.63, 61.67,  64092846,
+  "Sample_1", "RC",      37.78, 12.29, 49.94,   1243649,
+  "Sample_1", "Unknown",  4.44, 11.76, 83.80,  95119025,
+  
+  "Sample_2", "DNA",     24.53, 20.42, 55.05,  44356874,
+  "Sample_2", "LINE",    16.36, 15.84, 67.80, 617149144,
+  "Sample_2", "LTR",     20.19, 15.31, 64.51,  78219600,
+  "Sample_2", "RC",      44.15,  9.10, 46.75,   1851016,
+  "Sample_2", "Unknown",  4.19, 12.71, 83.09, 106334743,
+  
+  "Sample_3", "DNA",     26.23, 20.25, 53.52,  37196147,
+  "Sample_3", "LINE",    17.03, 15.81, 67.16, 506761711,
+  "Sample_3", "LTR",     22.58, 15.49, 61.92,  67238444,
+  "Sample_3", "RC",      41.58,  9.40, 49.02,   1509679,
+  "Sample_3", "Unknown",  5.11, 12.67, 82.22,  92675748,
+  
+  "Sample_4", "DNA",     25.90, 20.01, 54.09,  31925164,
+  "Sample_4", "LINE",    16.90, 15.62, 67.48, 446561053,
+  "Sample_4", "LTR",     21.73, 14.97, 63.30,  59006162,
+  "Sample_4", "RC",      37.70,  8.50, 53.80,   1175956,
+  "Sample_4", "Unknown",  5.19, 12.65, 82.16,  81233107
+)
+
+df <- df %>%
+  mutate(
+    Dataset = factor(Dataset, levels = dataset_levels),
+    Class = factor(Class, levels = class_levels)
+  )
+
+long <- df %>%
+  pivot_longer(
+    cols = c(Recent_percent, Intermediate_percent, Old_percent),
+    names_to = "divergence_bin",
+    values_to = "percent"
+  ) %>%
+  mutate(
+    divergence_bin = factor(
+      divergence_bin,
+      levels = c("Recent_percent", "Intermediate_percent", "Old_percent"),
+      labels = c("0–5% (recent)", "6–10% (intermediate)", "11–100% (old)")
+    )
+  )
+
+p <- ggplot(long, aes(x = Dataset, y = percent, fill = divergence_bin)) +
+  geom_col(position = "stack", width = 0.7) +
+  facet_wrap(~ Class, nrow = 1) +
+  scale_fill_brewer(palette = "Set2", name = "Divergence bin") +
+  scale_y_continuous(
+    labels = percent_format(scale = 1),
+    limits = c(0, 100.5)
+  ) +
+  labs(
+    title = "TE class divergence composition by dataset",
+    x = "Dataset",
+    y = "Percent of class"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "top",
+    panel.grid.major.x = element_blank()
+  )
+
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir, recursive = TRUE)
+}
+
+outfile <- file.path(out_dir, out_file)
+ggsave(outfile, p, width = 12, height = 5, dpi = 300)
+
+if (interactive()) {
+  print(p)
+}

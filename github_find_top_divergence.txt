@@ -1,0 +1,155 @@
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(scales)
+})
+
+input_file <- "path/to/repeat_landscape_all_samples_families_sanitized.tsv"
+out_dir <- "path/to/output_directory"
+
+plot_file <- file.path(out_dir, "top5_TE_families_grouped_all_samples.png")
+table_file <- file.path(out_dir, "top5_TE_families_divergence_table_all_samples.tsv")
+
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir, recursive = TRUE)
+}
+
+div <- read.delim(input_file, stringsAsFactors = FALSE)
+
+required_cols <- c(
+  "Sample",
+  "Rfam",
+  "Superfamily",
+  "Recent_percent",
+  "Intermediate_percent",
+  "Old_percent"
+)
+
+stopifnot(all(required_cols %in% colnames(div)))
+
+samples_to_plot <- unique(div$Sample)
+
+top_families <- div %>%
+  group_by(Superfamily, Rfam) %>%
+  summarise(
+    max_recent = max(Recent_percent, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(max_recent)) %>%
+  distinct(Superfamily, .keep_all = TRUE) %>%
+  slice_head(n = 5)
+
+families_to_plot <- top_families$Rfam
+family_order <- families_to_plot
+
+df <- div %>%
+  filter(Rfam %in% families_to_plot) %>%
+  mutate(
+    genome = factor(Sample, levels = samples_to_plot),
+    Rfam = factor(Rfam, levels = family_order)
+  ) %>%
+  select(
+    Rfam,
+    genome,
+    Recent_percent,
+    Intermediate_percent,
+    Old_percent
+  )
+
+long <- df %>%
+  pivot_longer(
+    cols = c(Recent_percent, Intermediate_percent, Old_percent),
+    names_to = "divergence_bin",
+    values_to = "percent"
+  ) %>%
+  mutate(
+    percent = ifelse(is.na(percent), 0, percent),
+    divergence_bin = factor(
+      divergence_bin,
+      levels = c("Recent_percent", "Intermediate_percent", "Old_percent"),
+      labels = c("0–5%", "6–10%", "11%+")
+    )
+  )
+
+family_levels <- levels(long$Rfam)
+bars_per_family <- length(samples_to_plot)
+gap <- 0.5
+
+positions <- data.frame()
+xpos <- 1
+
+for (fam in family_levels) {
+  for (s in samples_to_plot) {
+    positions <- rbind(
+      positions,
+      data.frame(Rfam = fam, genome = s, x = xpos)
+    )
+    xpos <- xpos + 1
+  }
+  xpos <- xpos + gap
+}
+
+long <- long %>%
+  left_join(positions, by = c("Rfam", "genome"))
+
+family_centers <- positions %>%
+  group_by(Rfam) %>%
+  summarise(center = mean(x), .groups = "drop")
+
+p <- ggplot(long, aes(x = x, y = percent, fill = divergence_bin)) +
+  geom_col(width = 0.9, color = "black", linewidth = 0.2) +
+  geom_text(
+    data = family_centers,
+    aes(x = center, y = 104, label = Rfam),
+    inherit.aes = FALSE,
+    fontface = "bold",
+    size = 3.5
+  ) +
+  scale_x_continuous(
+    breaks = positions$x,
+    labels = positions$genome,
+    expand = expansion(mult = c(0.01, 0.02))
+  ) +
+  scale_y_continuous(
+    labels = percent_format(scale = 1),
+    limits = c(0, 105)
+  ) +
+  scale_fill_brewer(palette = "Set2", name = "Divergence") +
+  labs(
+    title = "Divergence composition of top 5 most recently diverged TE families",
+    subtitle = paste(
+      "Five families chosen by max 0–5% divergence, one per superfamily, across",
+      length(samples_to_plot),
+      "samples"
+    ),
+    x = NULL,
+    y = "Percent composition"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    legend.position = "top",
+    panel.grid.major.x = element_blank(),
+    plot.margin = margin(t = 10, r = 5, b = 30, l = 5)
+  )
+
+ggsave(plot_file, p, width = 11, height = 6, dpi = 300)
+
+if (interactive()) {
+  print(p)
+}
+
+table_out <- long %>%
+  select(genome, Rfam, divergence_bin, percent) %>%
+  mutate(divergence_bin = as.character(divergence_bin)) %>%
+  pivot_wider(names_from = divergence_bin, values_from = percent) %>%
+  arrange(Rfam, genome)
+
+write.table(
+  table_out,
+  file = table_file,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)

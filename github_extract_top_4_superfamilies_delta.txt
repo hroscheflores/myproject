@@ -1,0 +1,265 @@
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(grid)
+
+input_dir <- "path/to/input_files"
+out_dir <- "path/to/output_directory"
+
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir, recursive = TRUE)
+}
+
+sanitized_file <- file.path(out_dir, "TE_family_sanitized_long.tsv")
+
+baseline_sample <- "Sample_1"
+required_samples <- c("Sample_1", "Sample_2", "Sample_3", "Sample_4")
+
+ann <- read.delim(sanitized_file, stringsAsFactors = FALSE)
+
+required_cols <- c(
+  "Sample",
+  "RawName",
+  "InferredLevel",
+  "InferredGroup",
+  "ParentSuperfamily",
+  "Percent"
+)
+
+stopifnot(all(required_cols %in% colnames(ann)))
+
+ann <- ann %>%
+  mutate(
+    InferredGroup = case_when(
+      InferredLevel == "Family" & grepl("^MULE-MuDR", InferredGroup) ~ "Mutator",
+      TRUE ~ InferredGroup
+    ),
+    ParentSuperfamily = case_when(
+      grepl("^MULE-MuDR", RawName) ~ "Mutator",
+      grepl("^PIF-Harbinger", RawName) ~ "PIF/Harbinger",
+      grepl("^Academ-1", RawName) ~ "Academ",
+      grepl("^Dong-R4", RawName) ~ "Dong-R4",
+      grepl("^Merlin", RawName) ~ "Merlin",
+      RawName == "P" | grepl("^P-", RawName) ~ "P",
+      grepl("^Sola-1", RawName) ~ "Sola",
+      TRUE ~ ParentSuperfamily
+    )
+  )
+
+family_long <- ann %>%
+  filter(InferredLevel == "Family") %>%
+  select(
+    Sample,
+    Family = InferredGroup,
+    Percent
+  )
+
+superfamily_long <- ann %>%
+  mutate(
+    Superfamily = case_when(
+      !is.na(ParentSuperfamily) ~ ParentSuperfamily,
+      InferredLevel == "Superfamily" ~ InferredGroup,
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Superfamily)) %>%
+  group_by(Sample, Superfamily) %>%
+  summarise(
+    Percent = sum(as.numeric(Percent), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(Family = Superfamily)
+
+save_plot_dual <- function(p, filename_base, width = 9, height = 6) {
+  ggsave(
+    file.path(out_dir, paste0(filename_base, ".png")),
+    p,
+    width = width,
+    height = height,
+    dpi = 300
+  )
+  
+  ggsave(
+    file.path(out_dir, paste0(filename_base, ".pdf")),
+    p,
+    width = width,
+    height = height,
+    device = cairo_pdf
+  )
+}
+
+compute_relative <- function(df_long) {
+  totals <- df_long %>%
+    group_by(Sample) %>%
+    summarise(
+      total_masked = sum(as.numeric(Percent), na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  df_long %>%
+    left_join(totals, by = "Sample") %>%
+    mutate(
+      RelativePercent = (as.numeric(Percent) / total_masked) * 100
+    )
+}
+
+compute_deltas <- function(df_rel, baseline = baseline_sample, mode = c("pp", "pct")) {
+  mode <- match.arg(mode)
+  
+  rel_means <- df_rel %>%
+    group_by(Sample, Family) %>%
+    summarise(
+      RelativePercent = mean(RelativePercent, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(names_from = Sample, values_from = RelativePercent)
+  
+  other_samples <- setdiff(names(rel_means), c("Family", baseline))
+  
+  for (s in other_samples) {
+    rel_means[[paste0("Delta_", s)]] <-
+      if (mode == "pp") {
+        rel_means[[s]] - rel_means[[baseline]]
+      } else {
+        (rel_means[[s]] / rel_means[[baseline]] - 1) * 100
+      }
+  }
+  
+  rel_means
+}
+
+format_delta <- function(x) {
+  ifelse(
+    is.na(x),
+    "NA",
+    ifelse(
+      x > 0,
+      paste0("+", round(x, 3)),
+      paste0("-", abs(round(x, 3)))
+    )
+  )
+}
+
+run_delta_pipeline <- function(
+    df_long_input,
+    group_label = "TE Families",
+    filename_suffix = "family",
+    baseline = baseline_sample,
+    required_samples = required_samples,
+    delta_mode = "pct"
+) {
+  stopifnot(all(required_samples %in% unique(df_long_input$Sample)))
+  
+  family_order <- df_long_input %>%
+    group_by(Family) %>%
+    summarise(
+      mean_percent = mean(Percent, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(mean_percent)) %>%
+    pull(Family)
+  
+  df_long <- df_long_input %>%
+    mutate(Family = factor(Family, levels = family_order))
+  
+  df_rel <- compute_relative(df_long)
+  rel_wide <- compute_deltas(df_rel, baseline = baseline, mode = delta_mode)
+  
+  rel_wide <- rel_wide %>%
+    mutate(
+      max_abs_delta = do.call(
+        pmax,
+        c(
+          lapply(select(., starts_with("Delta_")), abs),
+          list(na.rm = TRUE)
+        )
+      )
+    )
+  
+  top4 <- rel_wide %>%
+    arrange(desc(max_abs_delta)) %>%
+    slice_head(n = 4) %>%
+    pull(Family)
+  
+  df_delta_top4 <- rel_wide %>%
+    filter(Family %in% top4) %>%
+    select(Family, starts_with("Delta_")) %>%
+    pivot_longer(
+      cols = -Family,
+      names_to = "Comparison",
+      values_to = "Delta"
+    ) %>%
+    mutate(
+      Comparison = gsub("^Delta_", "", Comparison),
+      Family = factor(Family, levels = top4)
+    )
+  
+  ylab_txt <- ifelse(
+    delta_mode == "pct",
+    paste("Percent Change vs", baseline, "(%) -", group_label),
+    paste("Change in Relative % Masked (pp) -", group_label)
+  )
+  
+  p_top4_facets <- ggplot(
+    df_delta_top4,
+    aes(x = Comparison, y = Delta, fill = Comparison)
+  ) +
+    geom_col(color = "black", width = 0.7) +
+    geom_hline(yintercept = 0, color = "black") +
+    facet_wrap(~ Family, ncol = 2) +
+    labs(x = NULL, y = ylab_txt, fill = "Sample") +
+    scale_fill_brewer(palette = "Set1") +
+    theme_minimal(base_size = 14) +
+    theme(
+      panel.grid = element_blank(),
+      text = element_text(color = "black"),
+      axis.text = element_text(color = "black"),
+      strip.text = element_text(color = "black"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      legend.position = "right",
+      legend.title = element_text(size = 20, face = "bold"),
+      legend.text = element_text(size = 18),
+      legend.key.size = unit(1.5, "cm"),
+      panel.border = element_rect(
+        color = "black",
+        fill = NA,
+        linewidth = 1.2
+      )
+    )
+  
+  print(p_top4_facets)
+  save_plot_dual(p_top4_facets, paste0("top4_delta_facets_", filename_suffix))
+  
+  top4_table <- rel_wide %>%
+    arrange(desc(max_abs_delta)) %>%
+    slice_head(n = 4) %>%
+    mutate(
+      across(starts_with("Delta_"), format_delta),
+      max_abs_delta = round(max_abs_delta, 3)
+    ) %>%
+    select(Family, starts_with("Delta_"), max_abs_delta)
+  
+  cat("\nTop 4", group_label, "by delta relative contribution vs", baseline, ":\n")
+  print(top4_table, n = 4, width = Inf, row.names = FALSE)
+  
+  invisible(list(
+    df_rel = df_rel,
+    rel_wide = rel_wide,
+    top4_table = top4_table,
+    plot = p_top4_facets
+  ))
+}
+
+family_results <- run_delta_pipeline(
+  df_long_input = family_long,
+  group_label = "TE Families",
+  filename_suffix = "family"
+)
+
+superfamily_results <- run_delta_pipeline(
+  df_long_input = superfamily_long,
+  group_label = "TE Superfamilies",
+  filename_suffix = "superfamily"
+)

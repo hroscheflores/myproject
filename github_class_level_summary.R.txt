@@ -1,0 +1,146 @@
+# ===============================================================
+# Single-panel Stacked Barplot of TE Class Composition
+# from parseRM.summary.tab files
+# ===============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tools)
+library(grid)
+
+# ---------------------------------------------------------------
+# 1. USER SETTINGS
+# ---------------------------------------------------------------
+
+# Directory containing parseRM.summary.tab files
+input_dir <- "path/to/input_files"
+
+# Filename patterns mapped to user-defined sample labels.
+# Edit these patterns and labels for your own samples.
+sample_map <- c(
+  "sample_pattern_1" = "Sample_1",
+  "sample_pattern_2" = "Sample_2",
+  "sample_pattern_3" = "Sample_3",
+  "sample_pattern_4" = "Sample_4"
+)
+
+# Desired sample order in the plot
+sample_levels <- c("Sample_1", "Sample_2", "Sample_3", "Sample_4")
+
+# ---------------------------------------------------------------
+# 2. FILE DISCOVERY
+# ---------------------------------------------------------------
+
+summary_files <- list.files(
+  input_dir,
+  pattern = "parseRM\\.summary\\.tab$",
+  full.names = TRUE
+)
+
+if (length(summary_files) == 0) {
+  stop("No *.parseRM.summary.tab files found in input_dir.")
+}
+
+# ---------------------------------------------------------------
+# 3. MAP FILENAME TO SAMPLE LABEL
+# ---------------------------------------------------------------
+
+infer_sample_code <- function(filepath, sample_map) {
+  base <- basename(filepath)
+  
+  for (pattern in names(sample_map)) {
+    if (grepl(pattern, base, ignore.case = TRUE)) {
+      return(sample_map[[pattern]])
+    }
+  }
+  
+  file_path_sans_ext(base)
+}
+
+# ---------------------------------------------------------------
+# 4. PARSE ONE SUMMARY FILE (#BY CLASS ONLY)
+# ---------------------------------------------------------------
+
+parse_class_section <- function(filepath) {
+  lines <- readLines(filepath)
+  sample_code <- infer_sample_code(filepath, sample_map)
+  
+  class_idx <- grep("^#BY CLASS", lines)
+  if (length(class_idx) == 0) {
+    stop("Missing '#BY CLASS' in: ", filepath)
+  }
+  
+  header_idx <- class_idx + 1
+  start <- header_idx + 1
+  
+  rows <- list()
+  j <- start
+  
+  while (j <= length(lines)) {
+    line_j <- lines[j]
+    
+    if (trimws(line_j) == "" || grepl("^#", line_j)) {
+      break
+    }
+    
+    fields <- strsplit(line_j, "\t")[[1]]
+    
+    if (length(fields) >= 3) {
+      rows[[length(rows) + 1]] <- data.frame(
+        Sample = sample_code,
+        Category = fields[1],
+        Percent = as.numeric(fields[3]),
+        stringsAsFactors = FALSE
+      )
+    }
+    
+    j <- j + 1
+  }
+  
+  dplyr::bind_rows(rows)
+}
+
+# ---------------------------------------------------------------
+# 5. PARSE ALL FILES
+# ---------------------------------------------------------------
+
+df_class <- dplyr::bind_rows(
+  lapply(summary_files, parse_class_section)
+)
+
+df_class$Sample <- factor(df_class$Sample, levels = sample_levels)
+
+# ---------------------------------------------------------------
+# 6. FINAL PLOT
+# ---------------------------------------------------------------
+
+p <- ggplot(df_class, aes(x = Sample, y = Percent, fill = Category)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = NULL,
+    y = "Percent Masked",
+    x = NULL
+  ) +
+  scale_x_discrete(
+    expand = expansion(mult = c(0.24, 0))
+  ) +
+  scale_y_continuous(
+    breaks = c(0, 25, 50, 75, 100),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  coord_cartesian(ylim = c(0, 100)) +
+  theme(
+    panel.grid = element_blank(),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    axis.ticks = element_line(color = "black"),
+    axis.ticks.length = unit(4, "pt"),
+    axis.text = element_text(color = "black"),
+    legend.title = element_text(size = 18, face = "bold"),
+    legend.text = element_text(size = 16),
+    legend.key.size = unit(1.3, "cm")
+  )
+
+print(p)
